@@ -1,0 +1,557 @@
+---
+title: "STAT270 - Final Project"
+author: Jonathan Mason
+date: "`r Sys.Date()`"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, warning = FALSE, message = FALSE}
+
+library(ggplot2)
+library(tidyverse)
+library(graphics)
+library(mdsr) # install package if not installed
+library(discrim) # install package if not installed
+library(klaR) # install package if not installed
+library(kknn) # install package if not installed
+library(utils) # install package if not installed
+library(sp) # install package if not installed
+library(fs)
+library(Shiny)
+```
+
+**Note:** If you `Rmd` file submission knits you will receive total of **(5 points Extra Credit)**
+
+> **Directions:** Complete Task 1 and **one** of the Task 2 **or** 3!
+
+## Task 1 (Total 60 pts):
+
+### High-earners in the 1994 United States Census
+
+A marketing analyst might be interested in finding factors that can be used to predict whether a potential customer is a high-earner. The `1994` United States Census provides information that can inform such a model, with records from `32,561` adults that include a binary variable indicating whether each person makes greater or less than `$50,000` (more than `$80,000` today after accounting for inflation). This is our response variable.
+
+#### A bit of data preparation
+
+```{r prepare data}
+library(tidyverse)
+library(mdsr)
+url <-
+"http://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
+
+census <- read_csv(
+  url,
+  col_names = c(
+    "age", "workclass", "fnlwgt", "education", 
+    "education_1", "marital_status", "occupation", "relationship", 
+    "race", "sex", "capital_gain", "capital_loss", "hours_per_week", 
+    "native_country", "income"
+  )
+) %>%
+  mutate(income = factor(income), income_ind = as.numeric(income == ">50K")) # create indicator variable income_ind (0 - low, 1 - high earner)
+
+
+# look at the structure of the data
+glimpse(census)
+```
+
+**a) (10 pts)** Split the data set into two pieces by separating the rows at random. A sample of 70% of the rows will become the `training` data set, with the remaining 30% set aside as the `testing` (or "hold-out") data set. Use `set.seed(364)` in the beginning of your code. How many records are in the testing set? **9769**
+
+```{r split data set}
+library(tidymodels)
+set.seed(364)
+
+n <- nrow(census)
+census_parts <- census %>%
+  initial_split(prop = 0.7)
+train <- census_parts %>% training()
+test <- census_parts %>% testing()
+nrow(test)
+
+```
+
+**Note:** You should get around 24% of those in the sample make more than `$50k`. Thus, the accuracy of the *null model* is about `76%`, since we can get that many right by just predicting that everyone makes less than `$50k`.
+
+```{r}
+# if your training set is called `train` this code will produce the correct percentage
+pi_bar <- train %>%
+  count(income) %>%
+  mutate(pct = n / sum(n)) %>%
+  filter(income == ">50K") %>%
+  pull(pct)
+
+print(c("Percent >50K", pi_bar))
+```
+
+**Pro Tip:** Always benchmark your predictive models against a reasonable null model.
+
+**b) (10 pts)** Use `KNN` algorithm to classify the earners (`<=50K, >50K`, low/high) for High-earners in the 1994 United States Census data above. Select only the quantitative variables `age,education_1, capital_gain, capital_loss, hours_per_week`. Use `mode = "classification"` and `k=1`(use the closest neighbor) in the `nearest_neighbor` function arguments. Print the confusion matrix. State the accuracy.
+
+```{r}
+library(kknn)
+
+# distance metric only works with quantitative variables, saved them in train_q set
+train_q <- train %>% dplyr::select(income, where(is.numeric), -fnlwgt)
+
+# define knn classifier
+
+mod_knn <- nearest_neighbor(neighbors = 5, mode = "classification") %>%
+  set_engine("kknn", scale = TRUE) %>%
+  fit(income ~ ., data = train_q)
+
+# predict the income using the knn classifier saved in new column called `income_knn`
+
+pred <- train_q %>%
+  bind_cols(
+    predict(mod_knn, new_data = train_q, type = "class")
+  ) %>%
+  rename(income_knn = .pred_class)
+
+# print the confusion matrix
+
+pred %>%
+  conf_mat(income, income_knn)
+```
+
+Accuracy is: **1 or 100**
+
+```{r}
+
+# Find the Accuracy = (true positive and true negative)/total or use the `accuracy()` function.
+
+pred %>%
+  accuracy(income, income_knn)
+
+```
+
+#### Defined a formula object in `R`
+
+```{r model form}
+form <- as.formula(
+  "income ~ age + workclass + education + marital_status + 
+  occupation + relationship + race + sex + 
+  capital_gain + capital_loss + hours_per_week"
+)
+
+form
+```
+
+**c) (10 pts)** Build naive Bayes classifier and compute its accuracy using the formula given above, `form`.
+
+`income ~ age + workclass + education + marital.status + occupation +      relationship + race + sex + capital.gain + capital.loss +      hours.per.week`
+
+```{r warning = FALSE}
+library(discrim)
+
+# create naiveBayes classifier
+
+mod_nb <- naive_Bayes(mode = "classification") %>%
+  set_engine("klaR") %>%
+  fit(form, data = train)
+
+
+# use the predict method with the mod_nb model
+
+pred <- train %>%  
+  bind_cols(
+    predict(mod_nb, new_data = train, type = "class")
+  ) %>%
+  rename(income_nb = .pred_class)
+
+
+# confusion matrix
+
+pred %>%
+  conf_mat(income, income_nb)
+
+# accuracy
+
+pred %>% accuracy(income, income_nb)
+
+```
+
+**d) (10 pts)** Use logistic regression to model the probability of high earners (`income >50K`) for High-earners in the 1994 United States Census data above. As response variable use the variable `income_ind (0/1)` created in the data processing step at the beginning. As predictors use `age, education.num, sex`, and optionally `marital status` and other variables if you want. To review the usefulness of variables inspect the plots below.
+
+```{r}
+
+# create plot of income_ind vs age/education.num/sex/marital status
+
+log_plot <- ggplot(data = census, aes(x = age, y = income_ind)) + 
+  geom_jitter(alpha = 0.1, height = 0.05) + 
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) + 
+  ylab("Earner Status")
+
+log_plot + xlab("Age (in years)")
+
+log_plot + aes(x = education_1) +
+   xlab("Education level (1-16, 16 is the highest)")
+
+log_plot + aes(x = sex) +
+   xlab("Gender")
+
+log_plot + aes(x = marital_status) +
+   xlab("Marital Status")
+
+```
+
+**Q:** Which variables appear to be important: ? **age, gender, education level**
+
+Use a logistic regression model to model the probability of high income as a function of all chosen predictors.
+
+Use the `glm()` function by setting the `family = binomial` - for dichotomous outcomes
+
+```{r}
+logreg <- glm(income_ind ~ age + sex + education_1, family = "binomial", data = train) 
+# 
+tidy(logreg)
+
+```
+
+```{r warning=FALSE}
+# # use the predict method with the logreg model, below are predicted probability
+#
+logit_pred_prob <- predict(logreg, newdata = train, type = "response")
+
+# assign 1/0 based on logit_pred_prob > 0.5. This is predicted high-earner status "yes". You can define different cutoff value if preferred.
+
+pred_y <- as.numeric(logit_pred_prob > 0.5)
+
+# confusion matrix
+confusion <- table(pred_y, train$income_ind)
+
+confusion
+
+# accuracy
+mean(pred_y == train$income_ind, na.rm = TRUE)
+
+```
+
+**e) (10 pts)** Assessing the Logit model from **part d)** using the test set saved in `test` R-object.
+
+What is the accuracy of the model? **0.8024363**
+
+```{r}
+# use the predict method with the logreg model, below are predicted probability
+
+logit_pred_prob <- predict(logreg, newdata = test, type = "response")
+
+# assign 1/0 based on logit_pred_prob > 0.5. This is predicted high-earner status "yes". You can define different cutoff value if preferred.
+
+pred_y <- as.numeric(logit_pred_prob > 0.5)
+
+# confusion matrix
+
+confusion <- table(pred_y, test$income_ind)
+
+confusion
+
+
+# accuracy
+
+mean(pred_y == test$income_ind, na.rm = TRUE)
+```
+
+**f) (10 pts)** Which one of the classification models achieved the highest accuracy? **The second model with** `test`**.**
+
+## TASK 2 (Total 40 pts, 20 pts each part a & b below):
+
+Let us consider the unsupervised learning process of identifying different types of cars. The United States Department of Energy maintains automobile characteristics for thousands of cars: `miles per gallon`, `engine size`, `number of cylinders`, `number of gears`, etc.
+
+Please see their guide for more information. Here, we download a ZIP file from their website that contains fuel economy rating for the 2016 model year.
+
+Next, we use the `readxl` package to read this file into `R`, clean up some of the resulting variable names, select a small subset of the variables, and filter for distinct models of Toyota vehicles. The resulting data set contains information about `75` different models that Toyota produces. Store the data file "2016 FEGuide.xlsx" in a subfolder by the name 'data' in your working directory.
+
+Note: You may need to adjust the code below to specify the "2016 FEGuide.xlsx" file location if you opt out to store the data file in different location.
+
+```{r Models}
+
+# load the readxl package to read the xlsx file in R
+library(readxl)
+
+filename <- "data/2016 FEGuide.xlsx" # you may need to adjust the path if you opt out to store the data file in different location
+
+
+# use read_excel function to read the file by using the path stored in the filename 
+cars <- read_excel(filename) %>% 
+  janitor::clean_names() %>%
+  dplyr::select(
+    make = mfr_name, 
+    model = carline, 
+    displacement = eng_displ,
+    number_cyl,
+    number_gears,
+    city_mpg = city_fe_guide_conventional_fuel,
+    hwy_mpg = hwy_fe_guide_conventional_fuel
+  ) %>%
+  distinct(model, .keep_all = TRUE) %>% 
+  filter(make == "Toyota") # filter Toyota vehicles only
+
+# have a look at the data
+glimpse(cars)
+
+```
+
+As a large automaker, Toyota has a diverse lineup of cars, trucks, SUVs, and hybrid vehicles. Can we use unsupervised learning to categorize these vehicles in a sensible way with only the data we have been given?
+
+For an individual quantitative variable, it is easy to measure how far apart any two cars are: Take the difference between the numerical values. The different variables are, however, on different scales and in different units. For example, `gears` ranges only from `1` to `8`, while `city_mpg` goes from `13` to `58`. This means that some decision needs to be made about rescaling the variables so that the differences along each variable reasonably reflect how different the respective cars are. There is more than one way to do this, and in fact, there is no universally "best" solution---the best solution will always depend on the data and your domain expertise. The `dist()` function takes a simple and pragmatic point of view: **Each variable is equally important**.
+
+The output of `dist()` gives the distance from each individual car to every other car.
+
+```{r}
+car_diffs <- cars %>%
+  column_to_rownames(var = "model") %>%
+  dist()
+str(car_diffs)
+```
+
+Create distance matrix object from the `car_diffs`
+
+```{r}
+car_mat <- car_diffs %>% as.matrix() 
+car_mat[1:6, 1:6] %>% round(digits = 2)
+```
+
+```{r clustering, warning = FALSE, fig.height = 14, fig.width = 8}
+#install if not installed
+# install.packages("ape")
+
+library(ape) 
+car_diffs %>% 
+  hclust() %>% 
+  as.phylo() %>% 
+  plot(cex = 0.9, label.offset = 1)
+
+```
+
+Choose **one** of the car makers: `General Motors, Nissan, Ford Motor Company, Honda, Mercedes-Benz, BMW, Kia` - preferably maker that you are familiar with the models but not necessarily.
+
+**a) (Total 20 pts)** Create a tree constructed by hierarchical clustering that relates carmaker car models to one another.
+
+**YOUR CODE HERE:**
+
+```{r cars clustering, warning = FALSE, fig.height = 14, fig.width = 8}
+
+library(ape) 
+
+cars2 <- read_excel(filename) %>% 
+  janitor::clean_names() %>%
+  dplyr::select(
+    make = mfr_name, 
+    model = carline, 
+    displacement = eng_displ,
+    number_cyl,
+    number_gears,
+    city_mpg = city_fe_guide_conventional_fuel,
+    hwy_mpg = hwy_fe_guide_conventional_fuel
+  ) %>%
+  distinct(model, .keep_all = TRUE) %>% 
+  filter(make == "Mercedes-Benz") # filter Mercedes-Benz vehicles only
+
+car_diffs2 <- cars2 %>%
+  column_to_rownames(var = "model") %>%
+  dist()
+str(car_diffs2)
+
+car_mat <- car_diffs %>% as.matrix() 
+car_mat[1:6, 1:6] %>% round(digits = 2)
+
+
+car_diffs2 %>% 
+  hclust() %>% 
+  as.phylo() %>% 
+  plot(cex = 0.9, label.offset = 1)
+
+```
+
+**b) (Total 20 pts)** Attempt to interpret the tree, how the models in same cluster are similar and how clusters differ.
+
+**YOUR COMMENTS: Models are in the same clustered based upon their similarity in their displacement, number of cylinders, number of gears, city mpg, & highway mpg. The clusters closer to the top of the dendrogram differ in all areas from the clusters at the bottom of the tree.**
+
+## TASK 3 (Total 40 pts, 20 pts each part a & b below) K-means clustering (Geospatial data example)
+
+Another way to group similar cases is to assign each case to one of several distinct groups, but without constructing a hierarchy. The output is not a tree but a choice of group to which each case belongs. (There can be more detail than this; for instance, a probability for each group that a specific case belongs to the group.) This is like classification except that here **there is no response variable**.
+
+**Geospatial data example:**
+
+Consider the cities of the world (in `WorldCities`, in the `mdsr` package). Cities can be different and similar in many ways: population, age structure, public transportation and roads, building space per person, etc. The choice of *features* (or variables) depends on the purpose you have for making the grouping.
+
+Our purpose is to show you that clustering via machine learning can actually identify genuine patterns in the data.
+
+We will choose features that are utterly familiar: the **latitude** and **longitude** of each city.
+
+You already know about the location of cities. They are on land. And you know about the organization of land on earth: most land falls in one of the large clusters called continents.
+
+But the `WorldCities` data doesn't have any notion of continents. Perhaps it is possible that this feature, which you long ago internalized, can be learned by a computer that has never even taken grade-school geography.
+
+Consider the `4,000` biggest cities in the world and their longitudes and latitudes.
+
+```{r selectCities}
+BigCities <- world_cities %>% arrange(desc(population)) %>% 
+  head(4000) %>% 
+  dplyr::select(longitude, latitude)
+glimpse(BigCities)
+```
+
+Note that in these data, there is no ancillary information---not even the name of the city. However, the `k-means` clustering algorithm will separate these `4,000` points---each of which is located in a two-dimensional plane---into `k` clusters based on their locations alone.
+
+```{r}
+
+set.seed(15)
+# install the package first if not installed
+#install.packages("mclust")
+library(mclust) 
+
+# form 6 cluster iteratively
+city_clusts <- BigCities %>%
+kmeans(centers = 6) %>% fitted("classes") %>% as.character()
+
+# form 6 cluster iteratively, by forming initially 10 random sets
+km <- kmeans(BigCities, centers = 6, nstart = 10)
+# inspect the structure of the kmeans output cluster object
+str(km)
+
+# access two important features of cluster, their size and centers
+km$size
+km$centers
+
+BigCities <- BigCities %>% mutate(cluster = city_clusts) 
+
+# graph the clusters, using the cluster variable to pick the color in standard cartesian coordinate system
+BigCities %>% ggplot(aes(x = longitude, y = latitude)) +
+geom_point(aes(color = cluster), alpha = 0.5)
+
+```
+
+**a) Total (10 pts)** What did the above clustering algorithm seems to have identified?
+
+**Answer: Every continent location, excluding Antarctica.**
+
+**b) Total (30 pts)**
+
+**Projections:** The Earth happens to be an oblate spheroid---a three-dimensional flattened sphere. Yet we would like to create two-dimensional representations of the Earth that fit on pages or computer screens. The process of converting locations in a three-dimensional *geographic coordinate system* to a two-dimensional representation is called *projection*.
+
+A *coordinate reference system (CRS)* is needed to keep track of geographic locations. Every spatially-aware object in `R` can have a projection string, encoded using the `PROJ.4` map projection library. These can be retrieved (or set) using the `proj4string()` command.
+
+There are many *CRS*s, but a few are most common. A set of EPSG (European Petroleum Survey Group) codes provides a shorthand for the full PROJ.4 strings (like the one shown above). The most commonly-used are:
+
+**EPSG:4326** Also known as WGS84, this is the standard for GPS systems and Google Earth.
+
+**EPSG:3857** A Mercator projection used in maps tiles4 by Google Maps, Open Street Maps, etc.
+
+**EPSG:4269** NAD83, most commonly used by U.S. federal agencies.
+
+`R-Code` below uses **EPSG:4326**. Use the other **two standards** **EPSG:3857**, **EPSG:4269**
+
+Use `K-means` algorithm for each of the three (3) projections above and compare the three projections to the standard cartesian coordinates used in the example. Which one is best in identifying the continents?\
+\
+Answer: **WGS84**
+
+**Note:** Graphing the clusters in each projection is worth **10 pts**
+
+```{r Spatial Object}
+
+# assign the BigCities data.frame to a working data.frame object d 
+d <- BigCities #or BigCities[,c('longitude', 'latitude')]
+
+# create spatial object from d
+coordinates(d) <- 1:2
+
+# Set WGS 84 (EPSG:4326) standard for projecting longitude latitude coordinates
+proj4string(d) <- CRS("+init=epsg:4326")
+
+# coordinate reference system using the EPSG:4326 standard
+CRS.new <- CRS("+init=epsg:4326")
+
+# the d object in the new CRS, you may print out few records to see how it looks in the new CRS
+d.new <- spTransform(d, CRS.new)
+
+# just for information review the 
+proj4string(d.new) %>% strwrap()
+
+
+# form 6 cluster iteratively
+city_clusts <- as.data.frame(d.new) %>%
+kmeans(centers = 6) %>% fitted("classes") %>% as.character()
+
+# add a variable for the newly formed clusters
+df.new <- as.data.frame(d.new) %>% mutate(cluster = city_clusts, longitude = coords.x1, latitude = coords.x2)
+
+# graph the clusters, using the cluster variable to pick the color
+df.new %>% ggplot(aes(x = coords.x1, y = coords.x2)) +
+geom_point(aes(color = cluster), alpha = 0.5) +
+scale_color_brewer(palette = "Set3")
+
+```
+
+**YOUR CODE HERE:**
+
+```{r Spatial Object 2}
+
+# assign the BigCities data.frame to a working data.frame object d 
+d <- BigCities #or BigCities[,c('longitude', 'latitude')]
+
+# create spatial object from d
+coordinates(d) <- 1:2
+
+# Set Mercator projection (EPSG:3857) standard for projecting longitude latitude coordinates
+proj4string(d) <- CRS("+init=epsg:3857")
+
+# coordinate reference system using the EPSG:3857 standard
+CRS.new <- CRS("+init=epsg:3857")
+
+# the d object in the new CRS, you may print out few records to see how it looks in the new CRS
+d.new <- spTransform(d, CRS.new)
+
+# just for information review the 
+proj4string(d.new) %>% strwrap()
+
+
+# form 6 cluster iteratively
+city_clusts <- as.data.frame(d.new) %>%
+kmeans(centers = 6) %>% fitted("classes") %>% as.character()
+
+# add a variable for the newly formed clusters
+df.new <- as.data.frame(d.new) %>% mutate(cluster = city_clusts, longitude = coords.x1, latitude = coords.x2)
+
+# graph the clusters, using the cluster variable to pick the color
+df.new %>% ggplot(aes(x = coords.x1, y = coords.x2)) +
+geom_point(aes(color = cluster), alpha = 0.5) +
+scale_color_brewer(palette = "Set3")
+```
+
+```{r Spatial Object 3}
+
+# assign the BigCities data.frame to a working data.frame object d 
+d <- BigCities #or BigCities[,c('longitude', 'latitude')]
+
+# create spatial object from d
+coordinates(d) <- 1:2
+
+# Set NAD83 (EPSG:4269) standard for projecting longitude latitude coordinates
+proj4string(d) <- CRS("+init=epsg:4269")
+
+# coordinate reference system using the EPSG:4269 standard
+CRS.new <- CRS("+init=epsg:4269")
+
+# the d object in the new CRS, you may print out few records to see how it looks in the new CRS
+d.new <- spTransform(d, CRS.new)
+
+# just for information review the 
+proj4string(d.new) %>% strwrap()
+
+
+# form 6 cluster iteratively
+city_clusts <- as.data.frame(d.new) %>%
+kmeans(centers = 6) %>% fitted("classes") %>% as.character()
+
+# add a variable for the newly formed clusters
+df.new <- as.data.frame(d.new) %>% mutate(cluster = city_clusts, longitude = coords.x1, latitude = coords.x2)
+
+# graph the clusters, using the cluster variable to pick the color
+df.new %>% ggplot(aes(x = coords.x1, y = coords.x2)) +
+geom_point(aes(color = cluster), alpha = 0.5) +
+scale_color_brewer(palette = "Set3")
+```
